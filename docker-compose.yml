@@ -1,0 +1,39 @@
+version: '3.8'
+# Compatible con Docker y Podman
+
+services:
+  openshift-monitor:
+    build: .
+    container_name: openshift-monitor
+    restart: unless-stopped
+    env_file:
+      - config.env
+    volumes:
+      - ./reports:/app/reports:Z
+      - ./logs:/app/logs:Z
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8080/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - monitor-network
+    security_opt: # Podman specific
+      - label=disable
+    userns: host # Podman specific
+    user: "0:0" # Ejecutar como root temporalmente para permisos
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservables:
+          memory: 256M
+          cpus: '0.25'
+
+networks:
+  monitor-network:
+    driver: bridge 
