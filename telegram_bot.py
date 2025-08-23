@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class OpenShiftTelegramBot:
     """Bot de Telegram para monitoreo de OpenShift"""
     
-    def __init__(self, token: str, authorized_users: List[int], monitor: OpenShiftMonitor):
+    def __init__(self, token: str, authorized_users: List[int], monitor: 'OpenShiftMonitor'):
         """Inicializar el bot de Telegram"""
         self.token = token
         self.authorized_users = authorized_users
@@ -31,6 +31,7 @@ class OpenShiftTelegramBot:
         self.application = None
         self.callback_mapping = {}  # Mapeo de callback_data limpios a valores originales
         self.callback_counter = 0   # Contador para generar IDs únicos
+        self.chat_ids = set()      # Conjunto de chat IDs activos
         
     def _generate_callback_id(self, action: str, cluster_name: str, namespace_name: str = None) -> str:
         """Generar un ID único para callback_data"""
