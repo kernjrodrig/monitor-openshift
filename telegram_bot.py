@@ -16,23 +16,63 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 import json
+import re
 
 logger = logging.getLogger(__name__)
 
 class OpenShiftTelegramBot:
     """Bot de Telegram para monitoreo de OpenShift"""
     
-    def __init__(self, token: str, monitor_instance=None):
+    def __init__(self, token: str, authorized_users: List[int], monitor: OpenShiftMonitor):
+        """Inicializar el bot de Telegram"""
         self.token = token
-        self.monitor = monitor_instance
+        self.authorized_users = authorized_users
+        self.monitor = monitor
         self.application = None
-        self.chat_ids = set()
+        self.callback_mapping = {}  # Mapeo de callback_data limpios a valores originales
+        self.callback_counter = 0   # Contador para generar IDs únicos
         
-        # No se requieren usuarios autorizados - el bot funciona con cualquier usuario
-        logger.info("Bot configurado para funcionar con cualquier usuario")
+    def _generate_callback_id(self, action: str, cluster_name: str, namespace_name: str = None) -> str:
+        """Generar un ID único para callback_data"""
+        self.callback_counter += 1
+        callback_id = f"cb_{self.callback_counter:04d}"
         
-
+        # Guardar el mapeo
+        if namespace_name:
+            self.callback_mapping[callback_id] = (action, cluster_name, namespace_name)
+            logger.debug(f"Callback generado: {callback_id} -> ({action}, {cluster_name}, {namespace_name})")
+        else:
+            self.callback_mapping[callback_id] = (action, cluster_name)
+            logger.debug(f"Callback generado: {callback_id} -> ({action}, {cluster_name})")
+        
+        # Limpiar mapeo si es muy grande (más de 1000 entradas)
+        if len(self.callback_mapping) > 1000:
+            logger.info("Limpiando mapeo de callbacks (muy grande)")
+            self.callback_mapping.clear()
+            self.callback_counter = 0
+        
+        return callback_id
     
+    def _get_callback_data(self, callback_id: str):
+        """Obtener los datos originales del callback_data"""
+        data = self.callback_mapping.get(callback_id)
+        if data:
+            logger.debug(f"Callback resuelto: {callback_id} -> {data}")
+        else:
+            logger.warning(f"Callback no encontrado: {callback_id}")
+        return data
+    
+    def _clean_callback_data(self, data: str) -> str:
+        """Limpiar y validar callback_data para evitar errores de Telegram"""
+        # Remover caracteres problemáticos y limitar longitud
+        cleaned = re.sub(r'[^a-zA-Z0-9_-]', '_', data)
+        # Limitar a 64 bytes (límite de Telegram)
+        if len(cleaned.encode('utf-8')) > 64:
+            # Si es muy largo, truncar y agregar hash
+            hash_suffix = str(hash(data))[-8:]
+            cleaned = cleaned[:50] + '_' + hash_suffix
+        return cleaned
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Comando /start"""
         user_id = update.effective_user.id
@@ -491,10 +531,12 @@ Selecciona una opción del menú:
             await self.send_response(update, f"⚠️ No hay información de namespaces disponible para {cluster_name}")
             return
         
-        # Crear botones para cada namespace
+        # Crear botones para cada namespace con callback_data único
         keyboard = []
         for namespace_name in status.namespaces_status.keys():
-            keyboard.append([InlineKeyboardButton(f"📁 {namespace_name}", callback_data=f"pods_{cluster_name}_{namespace_name}")])
+            # Generar callback_data único
+            callback_id = self._generate_callback_id("pods", cluster_name, namespace_name)
+            keyboard.append([InlineKeyboardButton(f"📁 {namespace_name}", callback_data=callback_id)])
         
         # Botón para volver a la selección de cluster
         keyboard.append([InlineKeyboardButton("🔙 Volver a Clusters", callback_data="pods")])
@@ -602,7 +644,47 @@ Para ver **Pods** en {cluster_name}, selecciona un namespace:
             await self.handle_refresh_action(update, context)
         elif data == "menu":
             await self.show_menu(update, context)
-        # Manejar acciones específicas de cluster
+        # Manejar acciones específicas de cluster usando el sistema de mapeo
+        elif data.startswith("cb_"):
+            # Es un callback_data único, obtener los datos originales
+            callback_data = self._get_callback_data(data)
+            if callback_data:
+                if len(callback_data) == 2:
+                    # Formato: (action, cluster_name)
+                    action, cluster_name = callback_data
+                    
+                    if action == "metricas":
+                        context.args = [cluster_name]
+                        await self.metricas_command(update, context)
+                    elif action == "operadores":
+                        context.args = [cluster_name]
+                        await self.operadores_command(update, context)
+                    elif action == "operators":
+                        context.args = [cluster_name]
+                        await self.operadores_command(update, context)
+                    elif action == "nodes":
+                        context.args = [cluster_name]
+                        await self.nodes_command(update, context)
+                    elif action == "namespaces":
+                        context.args = [cluster_name]
+                        await self.namespaces_command(update, context)
+                    elif action == "pods":
+                        # Para pods necesitamos mostrar namespaces primero
+                        await self.show_namespace_selection(update, context, cluster_name)
+                    elif action == "actualizar":
+                        await query.edit_message_text("🔄 Actualizando datos...")
+                        # Aquí podrías forzar una actualización del monitor
+                        # Por ahora solo mostramos el mensaje
+                        await query.edit_message_text("✅ Datos actualizados. Usa /status para ver el estado actual.")
+                
+                elif len(callback_data) == 3:
+                    # Formato: (action, cluster_name, namespace_name)
+                    action, cluster_name, namespace_name = callback_data
+                    
+                    if action == "pods":
+                        context.args = [cluster_name, namespace_name]
+                        await self.pods_command(update, context)
+        # Mantener compatibilidad con el formato anterior por si acaso
         elif "_" in data:
             parts = data.split('_', 2)  # Permitir hasta 2 separadores
             
@@ -650,10 +732,12 @@ Para ver **Pods** en {cluster_name}, selecciona un namespace:
         
         clusters = list(self.monitor.cluster_statuses.keys())
         
-        # Crear botones para cada cluster
+        # Crear botones para cada cluster con callback_data único
         keyboard = []
         for cluster in clusters:
-            keyboard.append([InlineKeyboardButton(f"🏠 {cluster}", callback_data=f"{action}_{cluster}")])
+            # Generar callback_data único
+            callback_id = self._generate_callback_id(action, cluster)
+            keyboard.append([InlineKeyboardButton(f"🏠 {cluster}", callback_data=callback_id)])
         
         # Botón para volver al menú
         keyboard.append([InlineKeyboardButton("🔙 Volver al Menú", callback_data="menu")])
@@ -1154,6 +1238,34 @@ Hora: {status.timestamp.strftime('%H:%M:%S')}
         
         # Manejador para mensajes de texto
         self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_text))
+        
+        # Manejador de errores
+        self.application.add_error_handler(self.error_handler)
+    
+    async def error_handler(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Manejar errores del bot"""
+        logger.error(f"Error en el bot: {context.error}")
+        
+        # Si es un error de BadRequest, intentar manejar específicamente
+        if hasattr(context.error, '__class__') and 'BadRequest' in str(context.error.__class__):
+            if 'Button_data_invalid' in str(context.error):
+                logger.warning("Error de callback_data inválido, limpiando mapeo...")
+                # Limpiar el mapeo de callbacks para evitar futuros errores
+                self.callback_mapping.clear()
+                self.callback_counter = 0
+                
+                # Intentar enviar mensaje de error al usuario
+                try:
+                    if update and hasattr(update, 'callback_query'):
+                        await update.callback_query.answer("⚠️ Error en botones, por favor usa /menu para continuar")
+                    elif update and hasattr(update, 'message'):
+                        await update.message.reply_text("⚠️ Error en botones, por favor usa /menu para continuar")
+                except Exception as e:
+                    logger.error(f"No se pudo enviar mensaje de error: {e}")
+            else:
+                logger.error(f"Error de Telegram API: {context.error}")
+        else:
+            logger.error(f"Error general: {context.error}")
     
     async def start_bot(self):
         """Iniciar el bot"""

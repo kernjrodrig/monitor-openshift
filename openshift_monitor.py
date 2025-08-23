@@ -138,7 +138,17 @@ class OpenShiftMonitor:
         try:
             telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
             if telegram_token:
-                self.telegram_bot = OpenShiftTelegramBot(telegram_token, self)
+                # Obtener usuarios autorizados del archivo de configuración
+                authorized_users = []
+                try:
+                    auth_users_str = os.getenv('TELEGRAM_AUTHORIZED_USERS', '')
+                    if auth_users_str:
+                        authorized_users = [int(uid.strip()) for uid in auth_users_str.split(',') if uid.strip().isdigit()]
+                except Exception as e:
+                    logger.warning(f"No se pudieron parsear usuarios autorizados: {e}")
+                    authorized_users = []
+                
+                self.telegram_bot = OpenShiftTelegramBot(telegram_token, authorized_users, self)
                 logger.info("Bot de Telegram configurado")
                 
                 # Iniciar bot en un hilo separado
@@ -844,7 +854,7 @@ No se detectaron problemas críticos.
     def cleanup_old_reports(self, reports_dir: str):
         """Limpiar reportes antiguos"""
         try:
-            max_age_days = int(os.getenv('MAX_REPORTS_AGE_DAYS', 30))
+            max_age_days = int(os.getenv('MAX_REPORTS_AGE_DAYS', 3))
             cutoff_date = datetime.now() - timedelta(days=max_age_days)
             
             for filename in os.listdir(reports_dir):
